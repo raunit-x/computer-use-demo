@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any
 
 import yaml
 
@@ -195,38 +195,6 @@ class RunningUnderstanding:
             current_screen_context="",
             events_processed=0,
         )
-
-
-@dataclass
-class ExtractionProgress:
-    """Progress information for UI feedback during extraction."""
-    
-    phase: str  # "detecting_events", "building_understanding", "generating_workflow"
-    phase_progress: float  # 0.0 to 1.0 within current phase
-    current_description: str  # Human-readable status message
-    events_detected: int  # Total events detected so far
-    steps_identified: int  # Workflow steps identified so far
-    total_frames: int  # Total frames to process
-    frames_processed: int  # Frames processed so far
-    
-    def to_dict(self) -> dict:
-        return {
-            "phase": self.phase,
-            "phase_progress": self.phase_progress,
-            "current_description": self.current_description,
-            "events_detected": self.events_detected,
-            "steps_identified": self.steps_identified,
-            "total_frames": self.total_frames,
-            "frames_processed": self.frames_processed,
-        }
-
-
-class ProgressCallback(Protocol):
-    """Protocol for progress callback functions."""
-    
-    def __call__(self, progress: ExtractionProgress) -> None:
-        """Called with progress updates during extraction."""
-        ...
 
 
 # =============================================================================
@@ -509,42 +477,3 @@ class Workflow:
             if param.name not in result and param.default_value is not None:
                 result[param.name] = param.default_value
         return result
-
-
-# Keep these for backward compatibility
-@dataclass
-class RecordedEvent:
-    """An event from a recording session."""
-    
-    timestamp: float
-    event_type: str
-    data: dict
-    
-    def to_dict(self) -> dict:
-        return {
-            "timestamp": self.timestamp,
-            "event_type": self.event_type,
-            "data": self.data,
-        }
-
-
-@dataclass
-class RecordedSession:
-    """A recorded session ready for analysis."""
-    
-    session_id: str
-    duration: float
-    screenshots: list[dict]
-    events: list[RecordedEvent]
-    transcript_text: str | None
-    transcript_segments: list[dict] | None
-    
-    def to_dict(self) -> dict:
-        return {
-            "session_id": self.session_id,
-            "duration": self.duration,
-            "screenshots": self.screenshots,
-            "events": [e.to_dict() for e in self.events],
-            "transcript_text": self.transcript_text,
-            "transcript_segments": self.transcript_segments,
-        }

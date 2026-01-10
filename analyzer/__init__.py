@@ -8,13 +8,8 @@ from .schema import (
     # Multi-pass extraction types
     DetectedEvent,
     DetectedParameter,
-    ExtractionProgress,
-    ProgressCallback,
     RunningUnderstanding,
     WorkflowStep,
-    # Legacy types
-    RecordedEvent,
-    RecordedSession,
 )
 from .workflow_extractor import WorkflowExtractor
 from .parameter_detector import ParameterDetector
@@ -27,14 +22,9 @@ __all__ = [
     # Multi-pass extraction types
     "DetectedEvent",
     "DetectedParameter",
-    "ExtractionProgress",
-    "ProgressCallback",
     "RunningUnderstanding",
     "WorkflowStep",
     # Extractors
     "WorkflowExtractor",
     "ParameterDetector",
-    # Legacy types
-    "RecordedEvent",
-    "RecordedSession",
 ]

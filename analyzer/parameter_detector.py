@@ -7,47 +7,8 @@ from typing import Any
 from anthropic import Anthropic
 
 from .schema import Parameter, ParameterType, Workflow
-
-
-PARAMETER_DETECTION_PROMPT = """You are an expert at identifying parameterizable values in computer workflows.
-
-Given a workflow with instructions, analyze which values should be parameterized to make the workflow reusable with different inputs.
-
-Consider parameterizing:
-1. Search queries and text inputs - these are often the main variables
-2. Form field values - names, addresses, selections
-3. File paths or names
-4. Numeric values that might change
-5. Selection choices (dropdown values, checkboxes)
-6. URLs or web addresses that might vary
-
-DO NOT parameterize:
-1. UI navigation (which buttons to click)
-2. Keyboard shortcuts (Cmd+C, etc.)
-3. Fixed application behaviors
-4. Static element locations
-
-For each suggested parameter, provide:
-- A clear name (snake_case)
-- The type (string, number, boolean, selection)
-- A description of what it's for
-- The default value from the workflow
-- Whether it's required
-
-Output as JSON:
-{
-    "parameters": [
-        {
-            "name": "parameter_name",
-            "type": "string|number|boolean|selection",
-            "description": "What this parameter controls",
-            "default": "value from workflow",
-            "required": true,
-            "options": ["option1", "option2"]  // only for selection type
-        }
-    ],
-    "reasoning": "Brief explanation of parameter choices"
-}"""
+from .json_utils import extract_json_from_response
+from prompts.analyzer_prompts import PARAMETER_DETECTION_PROMPT
 
 
 class ParameterDetector:
@@ -119,20 +80,8 @@ class ParameterDetector:
             )
             response_text = response.content[0].text.strip()
         
-        # Extract JSON
-        if "```json" in response_text:
-            start = response_text.find("```json") + 7
-            end = response_text.find("```", start)
-            response_text = response_text[start:end].strip()
-        elif "```" in response_text:
-            start = response_text.find("```") + 3
-            end = response_text.find("```", start)
-            response_text = response_text[start:end].strip()
-        
-        try:
-            data = json.loads(response_text)
-        except json.JSONDecodeError:
-            return []
+        # Extract and parse JSON
+        data = extract_json_from_response(response_text, json_type="object", default={})
         
         # Convert to Parameter objects
         parameters = []
