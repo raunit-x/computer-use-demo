@@ -321,13 +321,33 @@ uv run python main.py --help
 
 ### Environment Variables
 
+Create a `.env` file in the `workflow_automation/` directory:
+
 ```bash
-# Required
+# Create the .env file
+touch .env
+```
+
+Add your API keys to the `.env` file:
+
+```env
+# Required for workflow execution (Claude computer-use)
+ANTHROPIC_API_KEY=your-anthropic-key
+
+# Required for audio transcription (Whisper)
+OPENAI_API_KEY=your-openai-key
+
+# Optional: For cost-optimized analysis using Gemini Flash
+# If not set, Claude will be used for all passes (works fine, but costs more)
+GOOGLE_API_KEY=your-google-key
+```
+
+The `.env` file is automatically loaded when running any command. You can also export the variables directly in your shell:
+
+```bash
 export ANTHROPIC_API_KEY="your-anthropic-key"
 export OPENAI_API_KEY="your-openai-key"
-
-# Optional (for cost-optimized analysis using Gemini Flash)
-export GOOGLE_API_KEY="your-google-key"
+export GOOGLE_API_KEY="your-google-key"  # optional
 ```
 
 > **Note**: If `GOOGLE_API_KEY` is not set, analysis will use Claude for all passes (works fine, but costs more). The Gemini free tier has rate limits (5 requests/minute), which the system handles with automatic batching and backoff.
