@@ -61,7 +61,8 @@ Important guidelines:
 - Use the voice-over transcript to understand intent and context
 - Group related micro-actions (like typing multiple characters) into single events
 - Note any loading states or delays as "wait" events
-- If you're uncertain, use lower confidence scores but still report the likely action"""
+- If you're uncertain, use lower confidence scores but still report the likely action
+- CRITICAL: For text values (names, URLs, typed content), ALWAYS use the EXACT spelling visible in the screenshots, NOT the transcript. The transcript may have phonetic errors. Screenshots are the source of truth for spelling."""
 
 UNDERSTANDING_UPDATE_PROMPT = """You are an expert at building workflow documentation from detected user actions.
 
@@ -134,7 +135,8 @@ Guidelines:
 - Identify ANY user-provided values as potential parameters (search terms, names, numbers, selections)
 - Preserve context from previous understanding while adding new insights
 - Update troubleshooting hints when you see potential failure points or alternatives
-- Use voice-over context to understand user intent and add helpful notes"""
+- Use voice-over context to understand user intent and add helpful notes
+- CRITICAL: For all text values (names, URLs, usernames, typed content), use the EXACT spelling from the detected events (which come from screenshots), NOT the voice-over. Transcripts often have phonetic errors for names and technical terms."""
 
 WORKFLOW_SYNTHESIS_PROMPT = """You are an expert at creating comprehensive, executable workflow documentation.
 
@@ -146,6 +148,9 @@ You have a complete understanding of a computer task workflow, built from analyz
 4. Includes context, tips, and troubleshooting guidance
 5. Is clear enough for an AI agent to execute while adapting to UI variations
 
+IMPORTANT: Parameter types MUST be one of: string, number, boolean, selection, coordinate
+(For dates, times, or other values, use "string" type)
+
 Output your workflow in this exact markdown format:
 
 ```markdown
@@ -155,7 +160,7 @@ name: "Short Descriptive Name"
 description: "One-line description of what this workflow accomplishes"
 parameters:
   - name: parameter_name
-    type: string
+    type: string  # One of: string, number, boolean, selection, coordinate
     description: "What this parameter is for"
     default: "value from recording"
     required: true
@@ -219,6 +224,9 @@ Your job is to create a comprehensive markdown workflow document that:
 3. Provides detailed step-by-step instructions
 4. Includes reasoning, tips, and troubleshooting guidance
 
+IMPORTANT: Parameter types MUST be one of: string, number, boolean, selection, coordinate
+(For dates, times, or other values, use "string" type)
+
 Output your workflow in this exact markdown format:
 
 ```markdown
@@ -228,7 +236,7 @@ name: "Short Descriptive Name"
 description: "One-line description of what this workflow accomplishes"
 parameters:
   - name: parameter_name
-    type: string
+    type: string  # One of: string, number, boolean, selection, coordinate
     description: "What this parameter is for"
     default: "value from recording"
     required: true

@@ -5,13 +5,17 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 from anthropic.types.beta import BetaContentBlockParam, BetaMessageParam
 
 from analyzer.schema import Workflow
 from .loop import workflow_sampling_loop
 from .macos_computer import ToolResult
+
+if TYPE_CHECKING:
+    from utils.logger import WorkflowLogger
+    from utils.tracking import CostTracker
 
 
 @dataclass
@@ -52,7 +56,9 @@ class WorkflowRunner:
         api_key: str | None = None,
         model: str = "claude-sonnet-4-5-20250929",
         max_tokens: int = 16384,
-        max_iterations: int = 50,
+        max_iterations: int = 100,
+        logger: "WorkflowLogger | None" = None,
+        cost_tracker: "CostTracker | None" = None,
     ):
         """Initialize the runner.
         
@@ -61,11 +67,15 @@ class WorkflowRunner:
             model: Claude model to use.
             max_tokens: Maximum tokens per response.
             max_iterations: Maximum loop iterations.
+            logger: Optional WorkflowLogger for structured output.
+            cost_tracker: Optional CostTracker for cost accumulation.
         """
         self.api_key = api_key
         self.model = model
         self.max_tokens = max_tokens
         self.max_iterations = max_iterations
+        self.logger = logger
+        self.cost_tracker = cost_tracker
     
     async def run(
         self,
@@ -73,6 +83,8 @@ class WorkflowRunner:
         parameters: dict[str, Any],
         output_callback: Callable[[BetaContentBlockParam], None] | None = None,
         tool_output_callback: Callable[[ToolResult, str], None] | None = None,
+        iteration_callback: Callable[[int, int], None] | None = None,
+        api_callback: Callable[[int, int], None] | None = None,
     ) -> ExecutionResult:
         """Run a workflow with the given parameters.
         
@@ -81,19 +93,28 @@ class WorkflowRunner:
             parameters: Parameter values to use.
             output_callback: Callback for model outputs.
             tool_output_callback: Callback for tool results.
+            iteration_callback: Callback for iteration progress.
+            api_callback: Callback for API token usage.
             
         Returns:
             ExecutionResult with success status and messages.
         """
+        # Log start if logger available
+        if self.logger:
+            self.logger.step(f"Starting workflow execution: {workflow.name}")
+        
         # Validate parameters
         errors = workflow.validate_parameters(parameters)
         if errors:
+            error_msg = f"Parameter validation failed: {', '.join(errors)}"
+            if self.logger:
+                self.logger.error(error_msg)
             return ExecutionResult(
                 success=False,
                 workflow_id=workflow.id,
                 parameters=parameters,
                 messages=[],
-                error=f"Parameter validation failed: {', '.join(errors)}",
+                error=error_msg,
                 completed_at=datetime.now().isoformat(),
             )
         
@@ -109,9 +130,16 @@ class WorkflowRunner:
                 api_key=self.api_key,
                 output_callback=output_callback,
                 tool_output_callback=tool_output_callback,
+                iteration_callback=iteration_callback,
+                api_usage_callback=api_callback,
                 max_tokens=self.max_tokens,
                 max_iterations=self.max_iterations,
+                logger=self.logger,
+                cost_tracker=self.cost_tracker,
             )
+            
+            if self.logger:
+                self.logger.success("Workflow execution completed")
             
             return ExecutionResult(
                 success=True,
@@ -122,12 +150,15 @@ class WorkflowRunner:
             )
             
         except Exception as e:
+            error_msg = str(e)
+            if self.logger:
+                self.logger.error(f"Workflow execution failed: {error_msg}")
             return ExecutionResult(
                 success=False,
                 workflow_id=workflow.id,
                 parameters=full_params,
                 messages=[],
-                error=str(e),
+                error=error_msg,
                 completed_at=datetime.now().isoformat(),
             )
     
@@ -137,6 +168,8 @@ class WorkflowRunner:
         parameters: dict[str, Any],
         output_callback: Callable[[BetaContentBlockParam], None] | None = None,
         tool_output_callback: Callable[[ToolResult, str], None] | None = None,
+        iteration_callback: Callable[[int, int], None] | None = None,
+        api_callback: Callable[[int, int], None] | None = None,
     ) -> ExecutionResult:
         """Synchronous wrapper for run()."""
         return asyncio.run(self.run(
@@ -144,6 +177,8 @@ class WorkflowRunner:
             parameters=parameters,
             output_callback=output_callback,
             tool_output_callback=tool_output_callback,
+            iteration_callback=iteration_callback,
+            api_callback=api_callback,
         ))
     
     @staticmethod

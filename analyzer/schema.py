@@ -238,10 +238,18 @@ class Parameter:
     def from_dict(cls, d: dict) -> "Parameter":
         """Create from dictionary."""
         # Support both 'type' and 'param_type' keys
-        param_type = d.get("type") or d.get("param_type", "string")
+        param_type_str = d.get("type") or d.get("param_type", "string")
+        
+        # Handle unknown types gracefully by falling back to STRING
+        try:
+            param_type = ParameterType(param_type_str)
+        except ValueError:
+            # Unknown type (e.g., "date", "datetime", etc.) - fall back to string
+            param_type = ParameterType.STRING
+        
         return cls(
             name=d["name"],
-            param_type=ParameterType(param_type),
+            param_type=param_type,
             description=d.get("description", ""),
             default_value=d.get("default") or d.get("default_value"),
             required=d.get("required", True),

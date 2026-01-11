@@ -1,9 +1,8 @@
 """Agentic sampling loop for workflow execution."""
 
-import json
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, cast, TYPE_CHECKING
 
 import httpx
 from anthropic import Anthropic, APIError, APIStatusError, APIResponseValidationError
@@ -23,6 +22,10 @@ from anthropic.types.beta import (
 from .macos_computer import MacOSComputerTool, ToolResult, ToolError
 from prompts.executor_prompts import WORKFLOW_SYSTEM_PROMPT
 
+if TYPE_CHECKING:
+    from utils.logger import WorkflowLogger
+    from utils.tracking import CostTracker
+
 
 def _format_parameters_section(parameters: dict[str, Any]) -> str:
     """Format parameters for display in the system prompt."""
@@ -37,55 +40,6 @@ def _format_parameters_section(parameters: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# Model pricing per million tokens (input, output)
-# From: https://platform.claude.com/docs/en/about-claude/pricing
-MODEL_PRICING: dict[str, tuple[float, float]] = {
-    # Claude Opus 4.5
-    "claude-opus-4-5-20250929": (5.0, 25.0),
-    "claude-opus-4-5": (5.0, 25.0),
-    # Claude Opus 4.1
-    "claude-opus-4-1-20250414": (15.0, 75.0),
-    "claude-opus-4-1": (15.0, 75.0),
-    # Claude Opus 4
-    "claude-opus-4-20250514": (15.0, 75.0),
-    "claude-opus-4": (15.0, 75.0),
-    # Claude Sonnet 4.5
-    "claude-sonnet-4-5-20250929": (3.0, 15.0),
-    "claude-sonnet-4-5": (3.0, 15.0),
-    # Claude Sonnet 4
-    "claude-sonnet-4-20250514": (3.0, 15.0),
-    "claude-sonnet-4": (3.0, 15.0),
-    # Claude Haiku 4.5
-    "claude-haiku-4-5-20250929": (1.0, 5.0),
-    "claude-haiku-4-5": (1.0, 5.0),
-}
-
-# Default pricing (Claude Sonnet 4.5)
-DEFAULT_PRICING = (3.0, 15.0)
-
-
-def _get_model_pricing(model: str) -> tuple[float, float]:
-    """Get pricing for a model. Returns (input_price_per_mtok, output_price_per_mtok)."""
-    return MODEL_PRICING.get(model, DEFAULT_PRICING)
-
-
-def _print_cost_summary(total_input_tokens: int, total_output_tokens: int, model: str) -> None:
-    """Print a summary of token usage and estimated cost."""
-    input_price, output_price = _get_model_pricing(model)
-    
-    input_cost = (total_input_tokens / 1_000_000) * input_price
-    output_cost = (total_output_tokens / 1_000_000) * output_price
-    total_cost = input_cost + output_cost
-    
-    print(f"\n{'='*50}")
-    print(f"[Cost Summary] Model: {model}")
-    print(f"  Pricing: ${input_price}/MTok in, ${output_price}/MTok out")
-    print(f"  Input tokens:  {total_input_tokens:,} (${input_cost:.4f})")
-    print(f"  Output tokens: {total_output_tokens:,} (${output_cost:.4f})")
-    print(f"  Total cost:    ${total_cost:.4f}")
-    print(f"{'='*50}")
-
-
 async def workflow_sampling_loop(
     *,
     workflow_instructions: str,
@@ -97,8 +51,12 @@ async def workflow_sampling_loop(
     api_response_callback: Callable[
         [httpx.Request, httpx.Response | object | None, Exception | None], None
     ] | None = None,
+    iteration_callback: Callable[[int, int], None] | None = None,
+    api_usage_callback: Callable[[int, int], None] | None = None,
     max_tokens: int = 16384,
-    max_iterations: int = 50,
+    max_iterations: int = 100,
+    logger: "WorkflowLogger | None" = None,
+    cost_tracker: "CostTracker | None" = None,
 ) -> list[BetaMessageParam]:
     """
     Agentic sampling loop for executing a learned workflow.
@@ -111,8 +69,12 @@ async def workflow_sampling_loop(
         output_callback: Callback for model outputs.
         tool_output_callback: Callback for tool results.
         api_response_callback: Callback for API responses.
+        iteration_callback: Callback for iteration progress (current, max).
+        api_usage_callback: Callback for API token usage (input, output).
         max_tokens: Maximum tokens for responses.
         max_iterations: Maximum number of loop iterations.
+        logger: Optional WorkflowLogger for structured output.
+        cost_tracker: Optional CostTracker for cost accumulation.
         
     Returns:
         List of conversation messages.
@@ -123,6 +85,43 @@ async def workflow_sampling_loop(
     # Track token usage for cost calculation
     total_input_tokens = 0
     total_output_tokens = 0
+    
+    # Helper for logging
+    def log_info(msg: str) -> None:
+        if logger:
+            logger.info(msg)
+        else:
+            print(f"[Loop] {msg}")
+    
+    def log_step(msg: str) -> None:
+        if logger:
+            logger.step(msg)
+        else:
+            print(f"[Loop] {msg}")
+    
+    def log_error(msg: str) -> None:
+        if logger:
+            logger.error(msg)
+        else:
+            print(f"[Loop] ERROR: {msg}")
+    
+    def log_api(input_tok: int, output_tok: int) -> None:
+        if logger:
+            logger.api(input_tok, output_tok)
+        else:
+            print(f"[Loop] Tokens: {input_tok:,} in, {output_tok:,} out")
+    
+    def log_iteration(current: int, total: int) -> None:
+        if logger:
+            logger.iteration(current, total)
+        else:
+            print(f"[Loop] Iteration {current}/{total}")
+    
+    def log_tool(tool_name: str, action: str) -> None:
+        if logger:
+            logger.tool(tool_name, action)
+        else:
+            print(f"[Loop] Tool call: {tool_name} action={action}")
     
     # Build system prompt with workflow instructions
     system_prompt = WORKFLOW_SYSTEM_PROMPT.format(
@@ -149,10 +148,13 @@ async def workflow_sampling_loop(
     iteration = 0
     while iteration < max_iterations:
         iteration += 1
-        print(f"[Loop] Iteration {iteration}/{max_iterations}")
+        log_iteration(iteration, max_iterations)
+        
+        if iteration_callback:
+            iteration_callback(iteration, max_iterations)
         
         try:
-            print(f"[Loop] Calling API with model: {model}")
+            log_step(f"Calling API with model: {model}")
             raw_response = client.beta.messages.with_raw_response.create(
                 max_tokens=max_tokens,
                 messages=messages,
@@ -161,14 +163,14 @@ async def workflow_sampling_loop(
                 tools=[cast(BetaToolUnionParam, computer_tool.to_params())],
                 betas=["computer-use-2025-01-24"],
             )
-            print(f"[Loop] API call succeeded")
+            log_info("API call succeeded")
         except (APIStatusError, APIResponseValidationError) as e:
-            print(f"[Loop] API Error: {e}")
+            log_error(f"API Error: {e}")
             if api_response_callback:
                 api_response_callback(e.request, e.response, e)
             raise  # Re-raise so WorkflowRunner knows it failed
         except APIError as e:
-            print(f"[Loop] API Error: {e}")
+            log_error(f"API Error: {e}")
             if api_response_callback:
                 api_response_callback(e.request, e.body, e)
             raise  # Re-raise so WorkflowRunner knows it failed
@@ -189,9 +191,15 @@ async def workflow_sampling_loop(
         total_input_tokens += input_tokens
         total_output_tokens += output_tokens
         
-        print(f"[Loop] Response has {len(response_params)} content blocks")
-        print(f"[Loop] Stop reason: {response.stop_reason}")
-        print(f"[Loop] Tokens: {input_tokens:,} in, {output_tokens:,} out")
+        log_info(f"Response has {len(response_params)} content blocks, stop_reason={response.stop_reason}")
+        log_api(input_tokens, output_tokens)
+        
+        # Track costs
+        if cost_tracker:
+            cost_tracker.add_usage(input_tokens, output_tokens)
+        
+        if api_usage_callback:
+            api_usage_callback(input_tokens, output_tokens)
         
         messages.append({
             "role": "assistant",
@@ -205,15 +213,12 @@ async def workflow_sampling_loop(
             if output_callback:
                 output_callback(content_block)
             
-            block_type = content_block.get("type") if isinstance(content_block, dict) else "unknown"
-            print(f"[Loop] Processing block: {block_type}")
-            
             if isinstance(content_block, dict) and content_block.get("type") == "tool_use":
                 tool_use_block = cast(BetaToolUseBlockParam, content_block)
                 tool_name = tool_use_block.get("name", "unknown")
                 tool_input = tool_use_block.get("input", {})
                 action = tool_input.get("action", "unknown") if isinstance(tool_input, dict) else "unknown"
-                print(f"[Loop] Tool call: {tool_name} action={action}")
+                log_tool(tool_name, action)
                 
                 try:
                     result = await computer_tool(
@@ -221,10 +226,10 @@ async def workflow_sampling_loop(
                     )
                 except ToolError as e:
                     result = ToolResult(error=e.message)
-                    print(f"[Loop] Tool error: {e.message}")
+                    log_error(f"Tool error: {e.message}")
                 except Exception as e:
                     result = ToolResult(error=str(e))
-                    print(f"[Loop] Tool exception: {e}")
+                    log_error(f"Tool exception: {e}")
                 
                 tool_result_content.append(
                     _make_api_tool_result(result, tool_use_block["id"])
@@ -235,17 +240,15 @@ async def workflow_sampling_loop(
         
         # If no tool calls, the model is done
         if not tool_result_content:
-            print(f"[Loop] No tool calls - model finished")
-            _print_cost_summary(total_input_tokens, total_output_tokens, model)
+            log_info("No tool calls - model finished")
             return messages
         
-        print(f"[Loop] Continuing with {len(tool_result_content)} tool results")
+        log_step(f"Continuing with {len(tool_result_content)} tool results")
         
         messages.append({"content": tool_result_content, "role": "user"})
     
     # Max iterations reached
-    print(f"[Loop] Max iterations ({max_iterations}) reached")
-    _print_cost_summary(total_input_tokens, total_output_tokens, model)
+    log_info(f"Max iterations ({max_iterations}) reached")
     return messages
 
 

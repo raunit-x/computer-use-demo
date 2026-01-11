@@ -25,6 +25,8 @@ from prompts.analyzer_prompts import (
 
 if TYPE_CHECKING:
     from recorder.video_processor import ProcessedSession
+    from utils.logger import WorkflowLogger
+    from utils.tracking import CostTracker
 
 
 class WorkflowExtractor:
@@ -41,6 +43,8 @@ class WorkflowExtractor:
         model: str = "claude-sonnet-4-5-20250929",
         use_openai: bool = False,
         max_image_dimension: int | None = None,
+        logger: "WorkflowLogger | None" = None,
+        cost_tracker: "CostTracker | None" = None,
     ):
         """Initialize the extractor.
         
@@ -49,16 +53,45 @@ class WorkflowExtractor:
             model: Model to use for extraction.
             use_openai: If True, use OpenAI API instead of Anthropic.
             max_image_dimension: Maximum dimension for resized images (default 1280).
+            logger: Optional WorkflowLogger for structured output.
+            cost_tracker: Optional CostTracker for cost accumulation.
         """
         self.use_openai = use_openai
         self.model = model
         self.max_image_dimension = max_image_dimension or self.MAX_IMAGE_DIMENSION
+        self.logger = logger
+        self.cost_tracker = cost_tracker
         
         if use_openai:
             from openai import OpenAI
             self.client: Any = OpenAI(api_key=api_key) if api_key else OpenAI()
         else:
             self.client = Anthropic(api_key=api_key) if api_key else Anthropic()
+    
+    def _log(self, message: str, level: str = "info") -> None:
+        """Log a message using the logger or print."""
+        if self.logger:
+            if level == "info":
+                self.logger.info(message)
+            elif level == "step":
+                self.logger.step(message)
+            elif level == "success":
+                self.logger.success(message)
+            elif level == "warning":
+                self.logger.warning(message)
+            elif level == "error":
+                self.logger.error(message)
+            elif level == "header":
+                self.logger.header(message)
+        else:
+            print(message)
+    
+    def _track_usage(self, input_tokens: int, output_tokens: int, phase: str) -> None:
+        """Track API usage if cost_tracker is available."""
+        if self.cost_tracker:
+            self.cost_tracker.add_usage(input_tokens, output_tokens, phase=phase)
+        if self.logger:
+            self.logger.api(input_tokens, output_tokens)
     
     def _resize_and_encode_image(self, image_path: Path) -> tuple[str, str]:
         """Resize image if needed and return base64-encoded data.
@@ -172,14 +205,12 @@ class WorkflowExtractor:
         frames = session.frames
         
         if verbose:
-            print(f"\n{'#'*60}")
-            print(f"# MULTI-PASS WORKFLOW EXTRACTION")
-            print(f"{'#'*60}")
-            print(f"Session ID: {session.session_id}")
-            print(f"Duration: {session.duration:.1f}s")
-            print(f"Total frames: {len(frames)}")
+            self._log("MULTI-PASS WORKFLOW EXTRACTION", level="header")
+            self._log(f"Session ID: {session.session_id}")
+            self._log(f"Duration: {session.duration:.1f}s")
+            self._log(f"Total frames: {len(frames)}")
             if session.transcript:
-                print(f"Transcript: {len(session.transcript.segments)} segments")
+                self._log(f"Transcript: {len(session.transcript.segments)} segments")
         
         if not frames:
             # Return empty workflow if no frames
@@ -216,12 +247,10 @@ class WorkflowExtractor:
         )
         
         if verbose:
-            print(f"\n{'#'*60}")
-            print(f"# EXTRACTION COMPLETE")
-            print(f"{'#'*60}")
-            print(f"Generated workflow: {workflow.name}")
-            print(f"  - {len(workflow.parameters)} parameters")
-            print(f"  - {len(workflow.instructions)} chars of instructions")
+            self._log("EXTRACTION COMPLETE", level="header")
+            self._log(f"Generated workflow: {workflow.name}", level="success")
+            self._log(f"  - {len(workflow.parameters)} parameters")
+            self._log(f"  - {len(workflow.instructions)} chars of instructions")
         
         workflow.source_session_id = session.session_id
         return workflow
@@ -861,13 +890,10 @@ class WorkflowExtractor:
         total_chunks = len(chunks)
         
         if verbose:
-            print(f"\n{'='*60}")
-            print(f"PASS 1: Event Detection")
-            print(f"{'='*60}")
-            print(f"Total frames: {total_frames}")
-            print(f"Chunk size: {chunk_size} frames (overlap: {overlap})")
-            print(f"Total chunks to process: {total_chunks}")
-            print()
+            self._log("PASS 1: Event Detection", level="header")
+            self._log(f"Total frames: {total_frames}")
+            self._log(f"Chunk size: {chunk_size} frames (overlap: {overlap})")
+            self._log(f"Total chunks to process: {total_chunks}")
         
         # Use tqdm for progress bar
         chunk_iterator = tqdm(
@@ -903,7 +929,7 @@ class WorkflowExtractor:
             all_events = self._merge_events(all_events, chunk_events, overlap > 0)
         
         if verbose:
-            print(f"\nPass 1 complete: Detected {len(all_events)} events")
+            self._log(f"Pass 1 complete: Detected {len(all_events)} events", level="success")
         
         return all_events
     
@@ -962,7 +988,7 @@ class WorkflowExtractor:
         # Call the appropriate API
         if self.use_openai:
             response_text = self._call_openai_with_prompt(
-                content, EVENT_DETECTION_PROMPT
+                content, EVENT_DETECTION_PROMPT, phase="pass1_events"
             )
         else:
             response = self.client.messages.create(
@@ -972,6 +998,12 @@ class WorkflowExtractor:
                 messages=[{"role": "user", "content": content}],
             )
             response_text = response.content[0].text
+            # Track usage
+            self._track_usage(
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+                phase="pass1_events",
+            )
         
         # Parse JSON response
         return self._parse_events_response(response_text)
@@ -1033,16 +1065,28 @@ class WorkflowExtractor:
         
         return content
     
-    def _call_openai_with_prompt(self, content: list[dict], system_prompt: str) -> str:
+    def _call_openai_with_prompt(
+        self,
+        content: list[dict],
+        system_prompt: str,
+        phase: str = "openai",
+    ) -> str:
         """Call OpenAI API with custom system prompt."""
         response = self.client.chat.completions.create(
             model=self.model,
-            max_completion_tokens=4096,
+            max_completion_tokens=16384,  # Increased from 4096 to handle growing understanding
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content},
             ],
         )
+        # Track usage if available
+        if response.usage:
+            self._track_usage(
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+                phase=phase,
+            )
         return response.choices[0].message.content
     
     def _parse_events_response(self, response_text: str) -> list[DetectedEvent]:
@@ -1118,13 +1162,10 @@ class WorkflowExtractor:
         num_batches = (total_events + batch_size - 1) // batch_size
         
         if verbose:
-            print(f"\n{'='*60}")
-            print(f"PASS 2: Building Understanding")
-            print(f"{'='*60}")
-            print(f"Total events to process: {total_events}")
-            print(f"Batch size: {batch_size} events")
-            print(f"Total batches: {num_batches}")
-            print()
+            self._log("PASS 2: Building Understanding", level="header")
+            self._log(f"Total events to process: {total_events}")
+            self._log(f"Batch size: {batch_size} events")
+            self._log(f"Total batches: {num_batches}")
         
         # Use tqdm for progress bar
         batch_iterator = tqdm(
@@ -1165,10 +1206,10 @@ class WorkflowExtractor:
             )
         
         if verbose:
-            print(f"\nPass 2 complete: Built understanding with {len(understanding.steps)} steps")
+            self._log(f"Pass 2 complete: Built understanding with {len(understanding.steps)} steps", level="success")
             if understanding.task_goal:
-                print(f"  Task goal: {understanding.task_goal[:80]}...")
-            print(f"  Parameters detected: {len(understanding.parameters)}")
+                self._log(f"  Task goal: {understanding.task_goal[:80]}...")
+            self._log(f"  Parameters detected: {len(understanding.parameters)}")
         
         return understanding
     
@@ -1193,16 +1234,22 @@ class WorkflowExtractor:
         # Call the appropriate API
         if self.use_openai:
             response_text = self._call_openai_with_prompt(
-                content, UNDERSTANDING_UPDATE_PROMPT
+                content, UNDERSTANDING_UPDATE_PROMPT, phase="pass2_understanding"
             )
         else:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=4096,
+                max_tokens=16384,  # Increased from 4096 to handle growing understanding
                 system=UNDERSTANDING_UPDATE_PROMPT,
                 messages=[{"role": "user", "content": content}],
             )
             response_text = response.content[0].text
+            # Track usage
+            self._track_usage(
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+                phase="pass2_understanding",
+            )
         
         # Parse the updated understanding
         return self._parse_understanding_response(
@@ -1256,8 +1303,10 @@ class WorkflowExtractor:
         if data is not None:
             try:
                 return RunningUnderstanding.from_dict(data)
-            except KeyError:
-                pass
+            except KeyError as e:
+                self._log(f"Failed to parse understanding response: {e}", level="warning")
+        else:
+            self._log(f"No valid JSON found in response (length: {len(response_text)} chars), falling back to previous understanding", level="warning")
         return fallback
     
     def _generate_workflow_pass(
@@ -1278,11 +1327,8 @@ class WorkflowExtractor:
             Final Workflow object.
         """
         if verbose:
-            print(f"\n{'='*60}")
-            print(f"PASS 3: Workflow Synthesis")
-            print(f"{'='*60}")
-            print(f"Synthesizing workflow from {len(understanding.steps)} steps...")
-            print()
+            self._log("PASS 3: Workflow Synthesis", level="header")
+            self._log(f"Synthesizing workflow from {len(understanding.steps)} steps...")
         
         # Build message content
         content = self._build_synthesis_message(understanding)
@@ -1292,7 +1338,7 @@ class WorkflowExtractor:
             # Call the appropriate API
             if self.use_openai:
                 response_text = self._call_openai_with_prompt(
-                    content, WORKFLOW_SYNTHESIS_PROMPT
+                    content, WORKFLOW_SYNTHESIS_PROMPT, phase="pass3_synthesis"
                 )
             else:
                 response = self.client.messages.create(
@@ -1302,6 +1348,12 @@ class WorkflowExtractor:
                     messages=[{"role": "user", "content": content}],
                 )
                 response_text = response.content[0].text
+                # Track usage
+                self._track_usage(
+                    response.usage.input_tokens,
+                    response.usage.output_tokens,
+                    phase="pass3_synthesis",
+                )
             pbar.update(1)
         
         # Parse the markdown response
@@ -1309,9 +1361,9 @@ class WorkflowExtractor:
         workflow = Workflow.from_markdown(markdown_content)
         
         if verbose:
-            print(f"\nPass 3 complete!")
-            print(f"  Workflow: {workflow.name}")
-            print(f"  Parameters: {len(workflow.parameters)}")
+            self._log(f"Pass 3 complete!", level="success")
+            self._log(f"  Workflow: {workflow.name}")
+            self._log(f"  Parameters: {len(workflow.parameters)}")
         
         return workflow
     
